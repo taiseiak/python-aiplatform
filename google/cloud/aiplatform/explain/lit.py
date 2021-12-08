@@ -16,7 +16,128 @@
 
 import sys
 
-from typing import Dict, List, Optional, OrderedDict, Tuple, Union
+from typing import Dict, List, OrderedDict, Tuple, Union
+
+try:
+    from lit_nlp.api import dataset as lit_dataset
+    from lit_nlp.api import model as lit_model
+    from lit_nlp.api import types as lit_types
+except ImportError:
+    raise ImportError(
+        "LIT is not installed and is required to get Dataset as the return format. "
+        'Please install the SDK using "pip install python-aiplatform[lit]"'
+    )
+
+try:
+    import tensorflow as tf
+except ImportError:
+    raise ImportError(
+        "Tensorflow is not installed and is required to load saved model. "
+        'Please install the SDK using "pip install pip install python-aiplatform[lit]"'
+    )
+
+if "pandas" not in sys.modules:
+    raise ImportError(
+        "Pandas is not installed and is required to read the dataset. "
+        'Please install Pandas using "pip install python-aiplatform[lit]"'
+    )
+
+
+class _VertexLitDataset(lit_dataset.Dataset):
+    """LIT dataset class for the Vertex LIT integration.
+
+    This is used in the create_lit_dataset function.
+    """
+
+    def __init__(
+        self,
+        dataset: "pd.Dataframe",  # noqa: F821
+        column_types: OrderedDict[str, "lit_types.LitType"],  # noqa: F821
+    ):
+        """Construct a VertexLitDataset.
+        Args:
+          dataset:
+            Required. A Pandas Dataframe that includes feature column names and data.
+          column_types:
+            Required. An OrderedDict of string names matching the columns of the dataset
+            as the key, and the associated LitType of the column.
+        """
+        self._examples = dataset.to_dict(orient="records")
+        self._column_types = column_types
+
+    def spec(self):
+        return dict(self._column_types)
+
+
+class _VertexLitModel(lit_model.Model):
+    """LIT model class for the Vertex LIT integration.
+
+    This is used in the create_lit_model function.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        input_types: OrderedDict[str, "lit_types.LitType"],  # noqa: F821
+        output_types: OrderedDict[str, "lit_types.LitType"],  # noqa: F821
+    ):
+        """Construct a VertexLitModel.
+            Args:
+              model:
+                Required. A string reference to a local TensorFlow saved model directory.
+                The model must have at most one input and one output tensor.
+              input_types:
+                Required. An OrderedDict of string names matching the features of the model
+                as the key, and the associated LitType of the feature.
+              output_types:
+                Required. An OrderedDict of string names matching the labels of the model
+                as the key, and the associated LitType of the label.
+        """
+        self._loaded_model = tf.saved_model.load(model)
+        serving_default = self._loaded_model.signatures[
+            tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY
+        ]
+        _, self._kwargs_signature = serving_default.structured_input_signature
+        self._output_signature = serving_default.structured_outputs
+
+        if len(self._kwargs_signature) != 1:
+            raise ValueError("Please use a model with only one input tensor.")
+
+        if len(self._output_signature) != 1:
+            raise ValueError("Please use a model with only one output tensor.")
+
+        self._input_types = input_types
+        self._output_types = output_types
+
+    def predict_minibatch(
+        self, inputs: List["lit_types.JsonDict"]
+    ) -> List["lit_types.JsonDict"]:
+        instances = []
+        for input in inputs:
+            instance = [input[feature] for feature in self._input_types]
+            instances.append(instance)
+        prediction_input_dict = {
+            next(iter(self._kwargs_signature)): tf.convert_to_tensor(instances)
+        }
+        prediction_dict = self._loaded_model.signatures[
+            tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY
+        ](**prediction_input_dict)
+        predictions = prediction_dict[next(iter(self._output_signature))].numpy()
+        outputs = []
+        for prediction in predictions:
+            outputs.append(
+                {
+                    label: value
+                    for label, value in zip(self._output_types.keys(), prediction)
+                }
+            )
+        return outputs
+
+    def input_spec(self) -> "lit_types.Spec":
+        return dict(self._input_types)
+
+    def output_spec(self) -> "lit_types.Spec":
+        return self._output_types
 
 
 def create_lit_dataset(
@@ -32,30 +153,8 @@ def create_lit_dataset(
               as the key, and the associated LitType of the column.
         Returns:
             A LIT Dataset object that has the data from the dataset provided.
-        Raises:
-            ImportError if LIT or Pandas is not installed.
     """
-    if "pandas" not in sys.modules:
-        raise ImportError(
-            "Pandas is not installed and is required to read the dataset. "
-            'Please install Pandas using "pip install python-aiplatform[lit]"'
-        )
-    try:
-        from lit_nlp.api import dataset as lit_dataset
-    except ImportError:
-        raise ImportError(
-            "LIT is not installed and is required to get Dataset as the return format. "
-            'Please install the SDK using "pip install python-aiplatform[lit]"'
-        )
-
-    class VertexLitDataset(lit_dataset.Dataset):
-        def __init__(self):
-            self._examples = dataset.to_dict(orient="records")
-
-        def spec(self):
-            return dict(column_types)
-
-    return VertexLitDataset()
+    return _VertexLitDataset(dataset, column_types)
 
 
 def create_lit_model(
@@ -66,7 +165,8 @@ def create_lit_model(
     """Creates a LIT Model object.
         Args:
           model:
-              Required. A string reference to a TensorFlow saved model directory. The model must have at most one input and one output tensor.
+              Required. A string reference to a local TensorFlow saved model directory.
+              The model must have at most one input and one output tensor.
           input_types:
               Required. An OrderedDict of string names matching the features of the model
               as the key, and the associated LitType of the feature.
@@ -75,78 +175,14 @@ def create_lit_model(
               as the key, and the associated LitType of the label.
         Returns:
             A LIT Model object that has the same functionality as the model provided.
-        Raises:
-            ImportError if LIT or TensorFlow is not installed.
-            ValueError if the model doesn't have only 1 input and output tensor.
     """
-    try:
-        import tensorflow as tf
-    except ImportError:
-        raise ImportError(
-            "Tensorflow is not installed and is required to load saved model. "
-            'Please install the SDK using "pip install pip install python-aiplatform[lit]"'
-        )
-
-    try:
-        from lit_nlp.api import model as lit_model
-        from lit_nlp.api import types as lit_types
-    except ImportError:
-        raise ImportError(
-            "LIT is not installed and is required to get Dataset as the return format. "
-            'Please install the SDK using "pip install python-aiplatform[lit]"'
-        )
-
-    loaded_model = tf.saved_model.load(model)
-    serving_default = loaded_model.signatures[
-        tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY
-    ]
-    _, kwargs_signature = serving_default.structured_input_signature
-    output_signature = serving_default.structured_outputs
-
-    if len(kwargs_signature) != 1:
-        raise ValueError("Please use a model with only one input tensor.")
-
-    if len(output_signature) != 1:
-        raise ValueError("Please use a model with only one output tensor.")
-
-    class VertexLitModel(lit_model.Model):
-        def predict_minibatch(
-            self, inputs: List["lit_types.JsonDict"]
-        ) -> List["lit_types.JsonDict"]:
-            instances = []
-            for input in inputs:
-                instance = [input[feature] for feature in input_types]
-                instances.append(instance)
-            prediction_input_dict = {
-                next(iter(kwargs_signature)): tf.convert_to_tensor(instances)
-            }
-            prediction_dict = loaded_model.signatures[
-                tf.saved_model.DEFAULT_SERVING_SIGNATURE_DEF_KEY
-            ](**prediction_input_dict)
-            predictions = prediction_dict[next(iter(output_signature))].numpy()
-            outputs = []
-            for prediction in predictions:
-                outputs.append(
-                    {
-                        label: value
-                        for label, value in zip(output_types.keys(), prediction)
-                    }
-                )
-            return outputs
-
-        def input_spec(self) -> "lit_types.Spec":
-            return input_types
-
-        def output_spec(self) -> "lit_types.Spec":
-            return output_types
-
-    return VertexLitModel()
+    return _VertexLitModel(model, input_types, output_types)
 
 
 def open_lit(
     models: Dict[str, "lit_model.Model"],  # noqa: F821
     datasets: Dict[str, "lit_dataset.Dataset"],  # noqa: F821
-    open_in_new_tab: Optional[bool] = True,
+    open_in_new_tab: bool = True,
 ):
     """Open LIT from the provided models and datasets.
         Args:
@@ -157,7 +193,7 @@ def open_lit(
           open_in_new_tab:
               Optional. A boolean to choose if LIT open in a new tab or not.
         Raises:
-            ImportError if LIT or TensorFlow is not installed.
+            ImportError if LIT is not installed.
     """
     try:
         from lit_nlp import notebook
@@ -173,11 +209,11 @@ def open_lit(
 
 def set_up_and_open_lit(
     dataset: Union["Pd.Dataframe", "lit_dataset.Dataset"],  # noqa: F821
-    column_types: OrderedDict[str, "lit_types.LitType"],  # noqa: F821
+    column_types: "OrderedDict[str, lit_types.LitType]",  # noqa: F821
     model: Union[str, "lit_model.Model"],  # noqa: F821
     input_types: Union[List[str], Dict[str, "LitType"]],  # noqa: F821
     output_types: Union[str, List[str], Dict[str, "LitType"]],  # noqa: F821
-    open_in_new_tab: Optional[bool] = True,
+    open_in_new_tab: bool = True,
 ) -> Tuple["lit_dataset.Dataset", "lit_model.Model"]:  # noqa: F821
     """Creates a LIT dataset and model and opens LIT.
         Args:
