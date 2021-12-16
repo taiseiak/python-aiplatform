@@ -105,8 +105,16 @@ class _VertexLitModel(lit_model.Model):
         self._input_types = input_types
         self._output_types = output_types
         self._input_tensor_name = next(iter(self._kwargs_signature))
+        self._attribution_explainer = None
         if os.environ.get("LIT_PROXY_URL"):
             self._set_up_attribution_explainer(model, attribution_method)
+
+    @property
+    def attribution_explainer(
+        self,
+    ) -> Union["AttributionExplainer", None]:  # noqa: F821
+        """Gets the attribution explainer property if set."""
+        return self._attribution_explainer
 
     def predict_minibatch(
         self, inputs: List[lit_types.JsonDict]
@@ -131,8 +139,8 @@ class _VertexLitModel(lit_model.Model):
                 }
             )
         # Get feature attributions
-        if hasattr(self, "_attribution_explainer"):
-            attributions = self._attribution_explainer.explain(
+        if self.attribution_explainer:
+            attributions = self.attribution_explainer.explain(
                 [{self._input_tensor_name: i} for i in instances]
             )
             for i, attribution in enumerate(attributions):
@@ -146,7 +154,7 @@ class _VertexLitModel(lit_model.Model):
 
     def output_spec(self) -> lit_types.Spec:
         output_spec_dict = dict(self._output_types)
-        if hasattr(self, "_attribution_explainer"):
+        if self.attribution_explainer:
             output_spec_dict["feature_attribution"] = lit_types.FeatureSalience(
                 signed=True
             )
