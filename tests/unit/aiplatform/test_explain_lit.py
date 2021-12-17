@@ -89,7 +89,7 @@ def set_up_pandas_dataframe_and_columns():
     columns = collections.OrderedDict(
         [
             ("feature_1", lit_types.Scalar()),
-            ("featue_2", lit_types.Scalar()),
+            ("feature_2", lit_types.Scalar()),
             ("label", lit_types.RegressionScore()),
         ]
     )

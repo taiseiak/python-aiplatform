@@ -69,6 +69,7 @@ class _VertexLitDataset(lit_dataset.Dataset):
         self._column_types = column_types
 
     def spec(self):
+        """Return a spec describing dataset elements."""
         return dict(self._column_types)
 
 
@@ -150,9 +151,11 @@ class _VertexLitModel(lit_model.Model):
         return outputs
 
     def input_spec(self) -> lit_types.Spec:
+        """Return a spec describing model inputs."""
         return dict(self._input_types)
 
     def output_spec(self) -> lit_types.Spec:
+        """Return a spec describing model outputs."""
         output_spec_dict = dict(self._output_types)
         if self.attribution_explainer:
             output_spec_dict["feature_attribution"] = lit_types.FeatureSalience(
